@@ -3153,7 +3153,17 @@ impl<P: ClapPlugin> Wrapper<P> {
         }
         let length = u64::from_le_bytes(length_bytes);
 
-        let mut read_buffer: Vec<u8> = Vec::with_capacity(length as usize);
+        // The length prefix comes from the stream itself, so a corrupt state
+        // could declare any size. A fallible reservation turns that into a
+        // graceful load failure instead of an allocation-failure abort.
+        let mut read_buffer: Vec<u8> = Vec::new();
+        if read_buffer.try_reserve_exact(length as usize).is_err() {
+            nih_debug_assert_failure!(
+                "The state stream declares a {} byte state, refusing to allocate that",
+                length
+            );
+            return false;
+        }
         if !read_stream(&*stream, read_buffer.spare_capacity_mut()) {
             nih_debug_assert_failure!(
                 "Error or end of stream while reading the state buffer from the stream."
@@ -3167,6 +3177,13 @@ impl<P: ClapPlugin> Wrapper<P> {
                 let success = wrapper.set_state_inner(&mut state);
                 if success {
                     nih_trace!("Loaded state ({} bytes)", read_buffer.len());
+
+                    // A host-initiated state load can change every parameter
+                    // value, and hosts expect the same explicit rescan request
+                    // the GUI preset-load path already makes before they
+                    // re-read them.
+                    let task_posted = wrapper.schedule_gui(Task::RescanParamValues);
+                    nih_debug_assert!(task_posted, "The task queue is full, dropping task...");
                 }
 
                 success
